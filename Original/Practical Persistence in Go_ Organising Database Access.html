@@ -1,0 +1,679 @@
+<!DOCTYPE html>
+<!-- saved from url=(0058)http://www.alexedwards.net/blog/organising-database-access -->
+<html lang="en-gb"><head><meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+
+
+<meta http-equiv="X-UA-Compatible" content="IE=edge">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+
+<title>Practical Persistence in Go: Organising Database Access</title>
+
+<meta name="author" content="Alex Edwards">
+<meta name="copyright" content="&lt;div class=" g-plusone"="">
+<script type="text/javascript" async="" src="./Practical Persistence in Go_ Organising Database Access_files/ga.js.Без названия"></script><script src="./Practical Persistence in Go_ Organising Database Access_files/cb=gapi.loaded_1" async=""></script><script src="./Practical Persistence in Go_ Organising Database Access_files/cb=gapi.loaded_0" async=""></script><script id="twitter-wjs" src="./Practical Persistence in Go_ Organising Database Access_files/widgets.js.Без названия"></script><script src="./Practical Persistence in Go_ Organising Database Access_files/platform.js.Без названия" async="" defer="" gapi_processed="true">
+  {lang: 'en-GB'}
+</script>
+
+<link rel="icon" href="http://www.alexedwards.net/static/images/favicon.ico">
+<link rel="stylesheet" href="./Practical Persistence in Go_ Organising Database Access_files/css">
+<link rel="stylesheet" href="./Practical Persistence in Go_ Organising Database Access_files/main.min.css">
+<link rel="alternate" href="http://www.alexedwards.net/static/feed.rss" type="application/rss+xml">
+
+<meta name="google-site-verification" content="cQSliJDuQ3qRlZyVLmjurqMe4x-Q_SxyvXtpQbWRbeY">
+<script type="text/javascript" charset="utf-8" async="" src="./Practical Persistence in Go_ Organising Database Access_files/button.b731e6c82269f70f6fc53634e044a4c6.js.Без названия"></script></head>
+<body>
+<header>
+<nav>
+  <a href="http://www.alexedwards.net/">Alex Edwards</a>
+  <ul>
+    <li><a href="http://www.alexedwards.net/blog">Blog</a></li>
+    <li><a href="http://www.alexedwards.net/static/feed.rss">RSS</a></li>
+  </ul>
+</nav>
+</header>
+
+<article>
+
+<header><h1>Practical Persistence in Go: Organising Database Access</h1> <span>16th July 2015</span></header>
+
+<p>A few weeks ago someone created a <a href="http://www.reddit.com/r/golang/comments/38hkor/go_best_practice_for_accessing_database_in/">thread on Reddit</a> asking:</p>
+
+<blockquote>
+<p>In the context of a web application what would you consider a Go best practice for accessing the database in (HTTP or other) handlers?</p>
+</blockquote>
+
+<p>The replies it got were a genuinely interesting mix. Some people advised using dependency injection, a few espoused the simplicity of using global variables, others suggested putting the connection pool pointer into x/net/context.</p>
+
+<p>Me? I think the right answer depends on the project.</p>
+
+<p><em>What's the overall structure and size of the project? What's your approach to testing? How is it likely to grow in the future?</em> All these things and more should play a part when you pick an approach to take.</p>
+
+<p>So in this post I'll take a look at four different methods for organising your code and structuring access to your database connection pool.</p>
+
+<h2 id="global-variables">Global variables</h2>
+
+<p>The first approach we'll look at is a common and straightforward one – putting the pointer to your database connection pool in a global variable.</p>
+
+<p>To keep code nice and DRY, you'll sometimes see this combined with an initialisation function that allows the connection pool global to be set from other packages and tests.</p>
+
+<p>I like concrete examples, so let's carry on working with the online bookstore database and code from my <a href="http://www.alexedwards.net/blog/practical-persistence-sql">previous post</a>. We'll create a simple application with an MVC-like structure – with the HTTP handlers in <code>main</code> and a <code>models</code> package containing a global <code>DB</code> variable, <code>InitDB()</code> function, and our database logic.</p>
+
+<figure class="shell"><code><pre>bookstore
+├── main.go
+└── models
+    ├── books.go
+    └── db.go
+</pre></code></figure>
+
+<figure class="file"><figcaption>File: main.go</figcaption><code class="go"><pre><span class="keyword">package</span> main
+
+<span class="keyword">import</span> (
+    <span class="string">"bookstore/models"</span>
+    <span class="string">"fmt"</span>
+    <span class="string">"net/http"</span>
+)
+
+<span class="keyword">func</span> main() {
+    models.InitDB(<span class="string">"postgres://user:pass@localhost/bookstore"</span>)
+
+    http.HandleFunc(<span class="string">"/books"</span>, booksIndex)
+    http.ListenAndServe(<span class="string">":3000"</span>, <span class="constant">nil</span>)
+}
+
+<span class="keyword">func</span> booksIndex(w http.ResponseWriter, r *http.Request) {
+    <span class="keyword">if</span> r.Method != <span class="string">"GET"</span> {
+        http.Error(w, http.StatusText<span class="number">(405</span>),<span class="number"> 405</span>)
+        <span class="keyword">return</span>
+    }
+    bks, err := models.AllBooks()
+    <span class="keyword">if</span> err != <span class="constant">nil</span> {
+        http.Error(w, http.StatusText<span class="number">(500</span>),<span class="number"> 500</span>)
+        <span class="keyword">return</span>
+    }
+    <span class="keyword">for</span> _, bk := <span class="keyword">range</span> bks {
+        fmt.Fprintf(w, <span class="string">"%s, %s, %s, £%.2f\n"</span>, bk.Isbn, bk.Title, bk.Author, bk.Price)
+    }
+}
+</pre></code></figure>
+
+<figure class="file"><figcaption>File: models/db.go</figcaption><code class="go"><pre><span class="keyword">package</span> models
+
+<span class="keyword">import</span> (
+    <span class="string">"database/sql"</span>
+    _ <span class="string">"github.com/lib/pq"</span>
+    <span class="string">"log"</span>
+)
+
+<span class="keyword">var</span> db *sql.DB
+
+<span class="keyword">func</span> InitDB(dataSourceName <span class="typename">string</span>) {
+    <span class="keyword">var</span> err error
+    db, err = sql.Open(<span class="string">"postgres"</span>, dataSourceName)
+    <span class="keyword">if</span> err != <span class="constant">nil</span> {
+        log.Panic(err)
+    }
+
+    <span class="keyword">if</span> err = db.Ping(); err != <span class="constant">nil</span> {
+        log.Panic(err)
+    }
+}
+</pre></code></figure>
+
+<figure class="file"><figcaption>File: models/books.go</figcaption><code class="go"><pre><span class="keyword">package</span> models
+
+<span class="keyword">type</span> Book <span class="keyword">struct</span> {
+    Isbn   <span class="typename">string</span>
+    Title  <span class="typename">string</span>
+    Author <span class="typename">string</span>
+    Price  <span class="typename">float32</span>
+}
+
+<span class="keyword">func</span> AllBooks() ([]*Book, error) {
+    rows, err := db.Query(<span class="string">"SELECT * FROM books"</span>)
+    <span class="keyword">if</span> err != <span class="constant">nil</span> {
+        <span class="keyword">return</span> <span class="constant">nil</span>, err
+    }
+    <span class="keyword">defer</span> rows.Close()
+
+    bks := <span class="built_in">make</span>([]*Book,<span class="number"> 0</span>)
+    <span class="keyword">for</span> rows.Next() {
+        bk := <span class="built_in">new</span>(Book)
+        err := rows.Scan(&amp;bk.Isbn, &amp;bk.Title, &amp;bk.Author, &amp;bk.Price)
+        <span class="keyword">if</span> err != <span class="constant">nil</span> {
+            <span class="keyword">return</span> <span class="constant">nil</span>, err
+        }
+        bks = <span class="built_in">append</span>(bks, bk)
+    }
+    <span class="keyword">if</span> err = rows.Err(); err != <span class="constant">nil</span> {
+        <span class="keyword">return</span> <span class="constant">nil</span>, err
+    }
+    <span class="keyword">return</span> bks, <span class="constant">nil</span>
+}
+</pre></code></figure>
+
+<p>If you run the application and make a request to <code>/books</code> you should get a response similar to:</p>
+
+<figure class="shell"><code><pre>$ curl -i localhost:3000/books
+<samp>HTTP/1.1 200 OK
+Content-Length: 205
+Content-Type: text/plain; charset=utf-8
+
+978-1503261969, Emma, Jayne Austen, £9.44
+978-1505255607, The Time Machine, H. G. Wells, £5.99
+978-1503379640, The Prince, Niccolò Machiavelli, £6.99</samp>
+</pre></code></figure>
+
+<p>Using a global variable like this is potentially a good fit if:</p>
+
+<ul>
+  <li>All your database logic is contained in the same package.</li>
+  <li>Your application is small enough that keeping track of globals in your head isn't a problem.</li>
+  <li>Your approach to testing means that you don't need to mock the database or run tests in parallel.</li>
+</ul>
+
+<p>For the example above using a global works just fine. But what happens in more complicated applications where database logic is spread over multiple packages?</p>
+
+<p>One option is to have multiple <code>InitDB</code> calls, but that can quickly become cluttersome and I've personally found it a bit flaky (it's easy to forget to initialise a connection pool and get nil-pointer panics at runtime). A second option is to create a separate <code>config</code> package with an exported <code>DB</code> variable and <code>import "yourproject/config"</code> into every file that needs it. Just in case it isn't immediately understandable what I mean, I've included a simple example <a href="https://gist.github.com/alexedwards/8b4b0cd4495d7c3abadd">in this gist</a>.</p>
+
+<h2 id="dependency-injection">Dependency injection</h2>
+
+<p>The second approach we'll look at is dependency injection. In our example, we want to explicitly pass a connection pool pointer to our HTTP handlers and then onward to our database logic.</p>
+
+<p>In a real-world application there are probably extra application-level (and concurrency-safe) items that you want your handlers to have access to. Things like pointers to your logger or template cache, as well as the database connection pool.</p>
+
+<p>So for projects where all your handlers are in the same package, a neat approach is to put these items into a custom <code>Env</code> type:</p>
+
+<figure class="plain"><code class="go"><pre><span class="keyword">type</span> Env <span class="keyword">struct</span> {
+    db *sql.DB
+    logger *log.Logger
+    templates *template.Template
+}
+</pre></code></figure>
+
+<p>… and then define your handlers as methods against <code>Env</code>. This provides a clean and idiomatic way of making the connection pool (and potentially other items) available to your handlers. Here's a full example:</p>
+
+<figure class="file"><figcaption>File: main.go</figcaption><code class="go"><pre><span class="keyword">package</span> main
+
+<span class="keyword">import</span> (
+    <span class="string">"bookstore/models"</span>
+    <span class="string">"database/sql"</span>
+    <span class="string">"fmt"</span>
+    <span class="string">"log"</span>
+    <span class="string">"net/http"</span>
+)
+
+<span class="keyword">type</span> Env <span class="keyword">struct</span> {
+    db *sql.DB
+}
+
+<span class="keyword">func</span> main() {
+    db, err := models.NewDB(<span class="string">"postgres://user:pass@localhost/bookstore"</span>)
+    <span class="keyword">if</span> err != <span class="constant">nil</span> {
+        log.Panic(err)
+    }
+    env := &amp;Env{db: db}
+
+    http.HandleFunc(<span class="string">"/books"</span>, env.booksIndex)
+    http.ListenAndServe(<span class="string">":3000"</span>, <span class="constant">nil</span>)
+}
+
+<span class="keyword">func</span> (env *Env) booksIndex(w http.ResponseWriter, r *http.Request) {
+    <span class="keyword">if</span> r.Method != <span class="string">"GET"</span> {
+        http.Error(w, http.StatusText<span class="number">(405</span>),<span class="number"> 405</span>)
+        <span class="keyword">return</span>
+    }
+    bks, err := models.AllBooks(env.db)
+    <span class="keyword">if</span> err != <span class="constant">nil</span> {
+        http.Error(w, http.StatusText<span class="number">(500</span>),<span class="number"> 500</span>)
+        <span class="keyword">return</span>
+    }
+    <span class="keyword">for</span> _, bk := <span class="keyword">range</span> bks {
+        fmt.Fprintf(w, <span class="string">"%s, %s, %s, £%.2f\n"</span>, bk.Isbn, bk.Title, bk.Author, bk.Price)
+    }
+}
+</pre></code></figure>
+
+<figure class="file"><figcaption>File: models/db.go</figcaption><code class="go"><pre><span class="keyword">package</span> models
+
+<span class="keyword">import</span> (
+    <span class="string">"database/sql"</span>
+    _ <span class="string">"github.com/lib/pq"</span>
+)
+
+<span class="keyword">func</span> NewDB(dataSourceName <span class="typename">string</span>) (*sql.DB, error) {
+    db, err := sql.Open(<span class="string">"postgres"</span>, dataSourceName)
+    <span class="keyword">if</span> err != <span class="constant">nil</span> {
+        <span class="keyword">return</span> <span class="constant">nil</span>, err
+    }
+    <span class="keyword">if</span> err = db.Ping(); err != <span class="constant">nil</span> {
+        <span class="keyword">return</span> <span class="constant">nil</span>, err
+    }
+    <span class="keyword">return</span> db, <span class="constant">nil</span>
+}
+</pre></code></figure>
+
+<figure class="file"><figcaption>File: models/books.go</figcaption><code class="go"><pre><span class="keyword">package</span> models
+
+<span class="keyword">import</span> <span class="string">"database/sql"</span>
+
+<span class="keyword">type</span> Book <span class="keyword">struct</span> {
+    Isbn   <span class="typename">string</span>
+    Title  <span class="typename">string</span>
+    Author <span class="typename">string</span>
+    Price  <span class="typename">float32</span>
+}
+
+<span class="keyword">func</span> AllBooks(db *sql.DB) ([]*Book, error) {
+    rows, err := db.Query(<span class="string">"SELECT * FROM books"</span>)
+    <span class="keyword">if</span> err != <span class="constant">nil</span> {
+        <span class="keyword">return</span> <span class="constant">nil</span>, err
+    }
+    <span class="keyword">defer</span> rows.Close()
+
+    bks := <span class="built_in">make</span>([]*Book,<span class="number"> 0</span>)
+    <span class="keyword">for</span> rows.Next() {
+        bk := <span class="built_in">new</span>(Book)
+        err := rows.Scan(&amp;bk.Isbn, &amp;bk.Title, &amp;bk.Author, &amp;bk.Price)
+        <span class="keyword">if</span> err != <span class="constant">nil</span> {
+            <span class="keyword">return</span> <span class="constant">nil</span>, err
+        }
+        bks = <span class="built_in">append</span>(bks, bk)
+    }
+    <span class="keyword">if</span> err = rows.Err(); err != <span class="constant">nil</span> {
+        <span class="keyword">return</span> <span class="constant">nil</span>, err
+    }
+    <span class="keyword">return</span> bks, <span class="constant">nil</span>
+}
+</pre></code></figure>
+
+<p><strong>Or using a closure…</strong></p>
+
+<p>If you don't want to define your handlers as methods on <code>Env</code> an alternative approach is to put your handler logic into a closure and <em>close over</em> the <code>Env</code> variable like so:</p>
+
+<figure class="file"><figcaption>File: main.go</figcaption><code class="go"><pre><span class="keyword">package</span> main
+
+<span class="keyword">import</span> (
+    <span class="string">"bookstore/models"</span>
+    <span class="string">"database/sql"</span>
+    <span class="string">"fmt"</span>
+    <span class="string">"log"</span>
+    <span class="string">"net/http"</span>
+)
+
+<span class="keyword">type</span> Env <span class="keyword">struct</span> {
+    db *sql.DB
+}
+
+<span class="keyword">func</span> main() {
+    db, err := models.NewDB(<span class="string">"postgres://user:pass@localhost/bookstore"</span>)
+    <span class="keyword">if</span> err != <span class="constant">nil</span> {
+        log.Panic(err)
+    }
+    env := &amp;Env{db: db}
+
+    http.Handle(<span class="string">"/books"</span>, booksIndex(env))
+    http.ListenAndServe(<span class="string">":3000"</span>, <span class="constant">nil</span>)
+}
+
+<span class="keyword">func</span> booksIndex(env *Env) http.Handler {
+    <span class="keyword">return</span> http.HandlerFunc(<span class="keyword">func</span>(w http.ResponseWriter, r *http.Request) {
+        <span class="keyword">if</span> r.Method != <span class="string">"GET"</span> {
+            http.Error(w, http.StatusText<span class="number">(405</span>),<span class="number"> 405</span>)
+            <span class="keyword">return</span>
+        }
+        bks, err := models.AllBooks(env.db)
+        <span class="keyword">if</span> err != <span class="constant">nil</span> {
+            http.Error(w, http.StatusText<span class="number">(500</span>),<span class="number"> 500</span>)
+            <span class="keyword">return</span>
+        }
+        <span class="keyword">for</span> _, bk := <span class="keyword">range</span> bks {
+            fmt.Fprintf(w, <span class="string">"%s, %s, %s, £%.2f\n"</span>, bk.Isbn, bk.Title, bk.Author, bk.Price)
+        }
+    })
+}
+</pre></code></figure>
+
+<p>Dependency injection in this way is quite a nice approach when:</p>
+
+<ul>
+  <li>All your handlers are contained in the same package.</li>
+  <li>There is a common set of dependencies that each of your handlers need.</li>
+  <li>Your approach to testing means that you don't need to mock the database or run tests in parallel.</li>
+</ul>
+
+<p>Again, you could still use this general approach if your handlers and database logic are spread across multiple packages. One way to achieve this would be to setup a separate <code>config</code> package exporting the <code>Env</code> type and <em>close over</em> <code>config.Env</code> in the same way as the example above. Here's a <a href="https://gist.github.com/alexedwards/5cd712192b4831058b21">basic gist</a>.</p>
+
+<h2 id="using-an-interface">Using an interface</h2>
+
+<p>We can take this dependency injection example a little further. Let's change the <code>models</code> package so that it exports a custom <code>DB</code> type (which embeds <code>*sql.DB</code>) and implement our database logic as methods against the <code>DB</code> type.</p>
+
+<p>The advantages of this are twofold: first it gives our code a really clean structure, but – more importantly – it also opens up the potential to mock our database for unit testing.</p>
+
+<p>Let's amend the example to include a new <code>Datastore</code> interface, which implements exactly the same methods as our new <code>DB</code> type.</p>
+
+<figure class="plain"><code class="go"><pre><span class="keyword">type</span> Datastore <span class="keyword">interface</span> {
+    AllBooks() ([]*Book, error)
+}
+</pre></code></figure>
+
+<p>We can then use this interface instead of the direct <code>DB</code> type throughout our application. Here's the updated example:</p>
+
+<figure class="file"><figcaption>File: main.go</figcaption><code class="go"><pre><span class="keyword">package</span> main
+
+<span class="keyword">import</span> (
+    <span class="string">"fmt"</span>
+    <span class="string">"log"</span>
+    <span class="string">"net/http"</span>
+    <span class="string">"bookstore/models"</span>
+)
+
+<span class="keyword">type</span> Env <span class="keyword">struct</span> {
+    db models.Datastore
+}
+
+<span class="keyword">func</span> main() {
+    db, err := models.NewDB(<span class="string">"postgres://user:pass@localhost/bookstore"</span>)
+    <span class="keyword">if</span> err != <span class="constant">nil</span> {
+        log.Panic(err)
+    }
+
+    env := &amp;Env{db}
+
+    http.HandleFunc(<span class="string">"/books"</span>, env.booksIndex)
+    http.ListenAndServe(<span class="string">":3000"</span>, <span class="constant">nil</span>)
+}
+
+<span class="keyword">func</span> (env *Env) booksIndex(w http.ResponseWriter, r *http.Request) {
+    <span class="keyword">if</span> r.Method != <span class="string">"GET"</span> {
+        http.Error(w, http.StatusText<span class="number">(405</span>),<span class="number"> 405</span>)
+        <span class="keyword">return</span>
+    }
+    bks, err := env.db.AllBooks()
+    <span class="keyword">if</span> err != <span class="constant">nil</span> {
+        http.Error(w, http.StatusText<span class="number">(500</span>),<span class="number"> 500</span>)
+        <span class="keyword">return</span>
+    }
+    <span class="keyword">for</span> _, bk := <span class="keyword">range</span> bks {
+        fmt.Fprintf(w, <span class="string">"%s, %s, %s, £%.2f\n"</span>, bk.Isbn, bk.Title, bk.Author, bk.Price)
+    }
+}
+</pre></code></figure>
+
+<figure class="file"><figcaption>File: models/db.go</figcaption><code class="go"><pre><span class="keyword">package</span> models
+
+<span class="keyword">import</span> (
+    _ <span class="string">"github.com/lib/pq"</span>
+    <span class="string">"database/sql"</span>
+)
+
+<span class="keyword">type</span> Datastore <span class="keyword">interface</span> {
+    AllBooks() ([]*Book, error)
+}
+
+<span class="keyword">type</span> DB <span class="keyword">struct</span> {
+    *sql.DB
+}
+
+<span class="keyword">func</span> NewDB(dataSourceName <span class="typename">string</span>) (*DB, error) {
+    db, err := sql.Open(<span class="string">"postgres"</span>, dataSourceName)
+    <span class="keyword">if</span> err != <span class="constant">nil</span> {
+        <span class="keyword">return</span> <span class="constant">nil</span>, err
+    }
+    <span class="keyword">if</span> err = db.Ping(); err != <span class="constant">nil</span> {
+        <span class="keyword">return</span> <span class="constant">nil</span>, err
+    }
+    <span class="keyword">return</span> &amp;DB{db}, <span class="constant">nil</span>
+}
+</pre></code></figure>
+
+<figure class="file"><figcaption>File: models/books.go</figcaption><code class="go"><pre><span class="keyword">package</span> models
+
+<span class="keyword">type</span> Book <span class="keyword">struct</span> {
+    Isbn   <span class="typename">string</span>
+    Title  <span class="typename">string</span>
+    Author <span class="typename">string</span>
+    Price  <span class="typename">float32</span>
+}
+
+<span class="keyword">func</span> (db *DB) AllBooks() ([]*Book, error) {
+    rows, err := db.Query(<span class="string">"SELECT * FROM books"</span>)
+    <span class="keyword">if</span> err != <span class="constant">nil</span> {
+        <span class="keyword">return</span> <span class="constant">nil</span>, err
+    }
+    <span class="keyword">defer</span> rows.Close()
+
+    bks := <span class="built_in">make</span>([]*Book,<span class="number"> 0</span>)
+    <span class="keyword">for</span> rows.Next() {
+        bk := <span class="built_in">new</span>(Book)
+        err := rows.Scan(&amp;bk.Isbn, &amp;bk.Title, &amp;bk.Author, &amp;bk.Price)
+        <span class="keyword">if</span> err != <span class="constant">nil</span> {
+            <span class="keyword">return</span> <span class="constant">nil</span>, err
+        }
+        bks = <span class="built_in">append</span>(bks, bk)
+    }
+    <span class="keyword">if</span> err = rows.Err(); err != <span class="constant">nil</span> {
+        <span class="keyword">return</span> <span class="constant">nil</span>, err
+    }
+    <span class="keyword">return</span> bks, <span class="constant">nil</span>
+}
+</pre></code></figure>
+
+<p>Because our handlers are now using the <code>Datastore</code> interface we can easily create mock database responses for any unit tests:</p>
+
+<figure class="plain"><code class="go"><pre><span class="keyword">package</span> main
+
+<span class="keyword">import</span> (
+    <span class="string">"bookstore/models"</span>
+    <span class="string">"net/http"</span>
+    <span class="string">"net/http/httptest"</span>
+    <span class="string">"testing"</span>
+)
+
+<span class="keyword">type</span> mockDB <span class="keyword">struct</span>{}
+
+<span class="keyword">func</span> (mdb *mockDB) AllBooks() ([]*models.Book, error) {
+    bks := <span class="built_in">make</span>([]*models.Book,<span class="number"> 0</span>)
+    bks = <span class="built_in">append</span>(bks, &amp;models.Book{<span class="string">"978-1503261969"</span>, <span class="string">"Emma"</span>, <span class="string">"Jayne Austen"</span>,<span class="number"> 9.44</span>})
+    bks = <span class="built_in">append</span>(bks, &amp;models.Book{<span class="string">"978-1505255607"</span>, <span class="string">"The Time Machine"</span>, <span class="string">"H. G. Wells"</span>,<span class="number"> 5.99</span>})
+    <span class="keyword">return</span> bks, <span class="constant">nil</span>
+}
+
+<span class="keyword">func</span> TestBooksIndex(t *testing.T) {
+    rec := httptest.NewRecorder()
+    req, _ := http.NewRequest(<span class="string">"GET"</span>, <span class="string">"/books"</span>, <span class="constant">nil</span>)
+
+    env := Env{db: &amp;mockDB{}}
+    http.HandlerFunc(env.booksIndex).ServeHTTP(rec, req)
+
+    expected := <span class="string">"978-1503261969, Emma, Jayne Austen, £9.44\n978-1505255607, The Time Machine, H. G. Wells, £5.99\n"</span>
+    <span class="keyword">if</span> expected != rec.Body.String() {
+        t.Errorf(<span class="string">"\n...expected = %v\n...obtained = %v"</span>, expected, rec.Body.String())
+    }
+}
+</pre></code></figure>
+
+<h2 id="request-scoped-context">Request-scoped context</h2>
+
+<p>Finally let's look at using request-scoped context to store and pass around the database connection pool. Specifically, we'll make use of the <a href="https://godoc.org/golang.org/x/net/context">x/net/context</a> package.</p>
+
+<p>Personally I'm not a fan of storing application-level variables in request-scoped context – it feels clunky and burdensome to me. The x/net/context documentation kinda advises against it too:</p>
+
+<blockquote>
+<p>Use context Values only for request-scoped data that transits processes and APIs, not for passing optional parameters to functions.</p>
+</blockquote>
+
+<p>That said, people <em>do</em> use this approach. And if your project consists of a sprawling set of packages – and using a global config is out of the question – it's quite an attractive proposition.</p>
+
+<p>Let's adapt the bookstore example one last time, passing <code>context.Context</code> to our handlers using the pattern suggested in this <a href="https://joeshaw.org/net-context-and-http-handler/#custom-context-handler-types">excellent article</a> by Joe Shaw.</p>
+
+<figure class="file"><figcaption>File: main.go</figcaption><code class="go"><pre><span class="keyword">package</span> main
+
+<span class="keyword">import</span> (
+  <span class="string">"bookstore/models"</span>
+  <span class="string">"fmt"</span>
+  <span class="string">"golang.org/x/net/context"</span>
+  <span class="string">"log"</span>
+  <span class="string">"net/http"</span>
+)
+
+<span class="keyword">type</span> ContextHandler <span class="keyword">interface</span> {
+  ServeHTTPContext(context.Context, http.ResponseWriter, *http.Request)
+}
+
+<span class="keyword">type</span> ContextHandlerFunc <span class="keyword">func</span>(context.Context, http.ResponseWriter, *http.Request)
+
+<span class="keyword">func</span> (h ContextHandlerFunc) ServeHTTPContext(ctx context.Context, rw http.ResponseWriter, req *http.Request) {
+  h(ctx, rw, req)
+}
+
+<span class="keyword">type</span> ContextAdapter <span class="keyword">struct</span> {
+  ctx     context.Context
+  handler ContextHandler
+}
+
+<span class="keyword">func</span> (ca *ContextAdapter) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
+  ca.handler.ServeHTTPContext(ca.ctx, rw, req)
+}
+
+<span class="keyword">func</span> main() {
+  db, err := models.NewDB(<span class="string">"postgres://user:pass@localhost/bookstore"</span>)
+  <span class="keyword">if</span> err != <span class="constant">nil</span> {
+    log.Panic(err)
+  }
+  ctx := context.WithValue(context.Background(), <span class="string">"db"</span>, db)
+
+  http.Handle(<span class="string">"/books"</span>, &amp;ContextAdapter{ctx, ContextHandlerFunc(booksIndex)})
+  http.ListenAndServe(<span class="string">":3000"</span>, <span class="constant">nil</span>)
+}
+
+<span class="keyword">func</span> booksIndex(ctx context.Context, w http.ResponseWriter, r *http.Request) {
+  <span class="keyword">if</span> r.Method != <span class="string">"GET"</span> {
+    http.Error(w, http.StatusText<span class="number">(405</span>),<span class="number"> 405</span>)
+    <span class="keyword">return</span>
+  }
+  bks, err := models.AllBooks(ctx)
+  <span class="keyword">if</span> err != <span class="constant">nil</span> {
+    http.Error(w, http.StatusText<span class="number">(500</span>),<span class="number"> 500</span>)
+    <span class="keyword">return</span>
+  }
+  <span class="keyword">for</span> _, bk := <span class="keyword">range</span> bks {
+    fmt.Fprintf(w, <span class="string">"%s, %s, %s, £%.2f\n"</span>, bk.Isbn, bk.Title, bk.Author, bk.Price)
+  }
+}
+</pre></code></figure>
+
+<figure class="file"><figcaption>File: models/db.go</figcaption><code class="go"><pre><span class="keyword">package</span> models
+
+<span class="keyword">import</span> (
+    <span class="string">"database/sql"</span>
+    _ <span class="string">"github.com/lib/pq"</span>
+)
+
+<span class="keyword">func</span> NewDB(dataSourceName <span class="typename">string</span>) (*sql.DB, error) {
+    db, err := sql.Open(<span class="string">"postgres"</span>, dataSourceName)
+    <span class="keyword">if</span> err != <span class="constant">nil</span> {
+        <span class="keyword">return</span> <span class="constant">nil</span>, err
+    }
+    <span class="keyword">if</span> err = db.Ping(); err != <span class="constant">nil</span> {
+        <span class="keyword">return</span> <span class="constant">nil</span>, err
+    }
+    <span class="keyword">return</span> db, <span class="constant">nil</span>
+}
+</pre></code></figure>
+
+<figure class="file"><figcaption>File: models/books.go</figcaption><code class="go"><pre><span class="keyword">package</span> models
+
+<span class="keyword">import</span> (
+    <span class="string">"database/sql"</span>
+    <span class="string">"errors"</span>
+    <span class="string">"golang.org/x/net/context"</span>
+)
+
+<span class="keyword">type</span> Book <span class="keyword">struct</span> {
+    Isbn   <span class="typename">string</span>
+    Title  <span class="typename">string</span>
+    Author <span class="typename">string</span>
+    Price  <span class="typename">float32</span>
+}
+
+<span class="keyword">func</span> AllBooks(ctx context.Context) ([]*Book, error) {
+    db, ok := ctx.Value(<span class="string">"db"</span>).(*sql.DB)
+    <span class="keyword">if</span> !ok {
+        <span class="keyword">return</span> <span class="constant">nil</span>, errors.New(<span class="string">"models: could not get database connection pool from context"</span>)
+    }
+
+    rows, err := db.Query(<span class="string">"SELECT * FROM books"</span>)
+    <span class="keyword">if</span> err != <span class="constant">nil</span> {
+        <span class="keyword">return</span> <span class="constant">nil</span>, err
+    }
+    <span class="keyword">defer</span> rows.Close()
+
+    bks := <span class="built_in">make</span>([]*Book,<span class="number"> 0</span>)
+    <span class="keyword">for</span> rows.Next() {
+        bk := <span class="built_in">new</span>(Book)
+        err := rows.Scan(&amp;bk.Isbn, &amp;bk.Title, &amp;bk.Author, &amp;bk.Price)
+        <span class="keyword">if</span> err != <span class="constant">nil</span> {
+            <span class="keyword">return</span> <span class="constant">nil</span>, err
+        }
+        bks = <span class="built_in">append</span>(bks, bk)
+    }
+    <span class="keyword">if</span> err = rows.Err(); err != <span class="constant">nil</span> {
+        <span class="keyword">return</span> <span class="constant">nil</span>, err
+    }
+    <span class="keyword">return</span> bks, <span class="constant">nil</span>
+}
+</pre></code></figure>
+
+<form id="book-mailing-list">
+  <p>If you found this post useful you might like the book I'm writing: <em>Building real-world web applications in Go</em>.</p>
+  <p>Get the free sample chapter:</p>
+  <p id="confirmation"></p>
+  <input type="email" name="email" placeholder="Your email address" required="">
+  <button type="submit">Send me the sample chapter</button>
+</form>
+
+<p class="tags">Filed under: <a href="http://www.alexedwards.net/blog/category/golang">golang</a>, <a href="http://www.alexedwards.net/blog/category/tutorial">tutorial</a></p>
+
+<p class="subtle"><small>All code snippets in this post are made available to use under the <a href="http://opensource.org/licenses/MIT">MIT Licence</a>.</small></p>
+
+<div id="___plusone_0" style="text-indent: 0px; margin: 0px; padding: 0px; background: transparent; border-style: none; float: none; line-height: normal; font-size: 1px; vertical-align: baseline; display: inline-block; width: 106px; height: 24px;"><iframe ng-non-bindable="" frameborder="0" hspace="0" marginheight="0" marginwidth="0" scrolling="no" style="position: static; top: 0px; width: 106px; margin: 0px; border-style: none; left: 0px; visibility: visible; height: 24px;" tabindex="0" vspace="0" width="100%" id="I0_1498343538831" name="I0_1498343538831" src="./Practical Persistence in Go_ Organising Database Access_files/fastbutton.html" data-gapiattached="true" title="+1"></iframe></div>
+<script src="./Practical Persistence in Go_ Organising Database Access_files/platform.js.Без названия" async="" defer="" gapi_processed="true">
+  {lang: 'en-GB'}
+</script>
+
+<iframe id="twitter-widget-0" scrolling="no" frameborder="0" allowtransparency="true" class="twitter-share-button twitter-share-button-rendered twitter-tweet-button" style="position: static; visibility: visible; width: 60px; height: 20px;" title="Twitter Tweet Button" src="./Practical Persistence in Go_ Organising Database Access_files/tweet_button.7bf2b0e802ada47dae9548b7a1739fed.en-gb.html"></iframe>
+<script>!function(d,s,id){var js,fjs=d.getElementsByTagName(s)[0],p=/^http:/.test(d.location)?'http':'https';if(!d.getElementById(id)){js=d.createElement(s);js.id=id;js.src=p+'://platform.twitter.com/widgets.js';fjs.parentNode.insertBefore(js,fjs);}}(document, 'script', 'twitter-wjs');</script>
+
+</article>
+
+<script src="./Practical Persistence in Go_ Organising Database Access_files/jquery.min.js.Без названия"></script>
+<script src="./Practical Persistence in Go_ Organising Database Access_files/highlight.pack.js.Без названия"></script>
+<script type="text/javascript">
+
+  var _gaq = _gaq || [];
+  _gaq.push(['_setAccount', 'UA-23830196-1']);
+  _gaq.push(['_trackPageview']);
+  (function() {
+    var ga = document.createElement('script'); ga.type = 'text/javascript'; ga.async = true;
+    ga.src = ('https:' == document.location.protocol ? 'https://ssl' : 'http://www') + '.google-analytics.com/ga.js';
+    var s = document.getElementsByTagName('script')[0]; s.parentNode.insertBefore(ga, s);
+  })();
+
+  $(document).ready(function() {
+    $('figure.file code, figure.plain code').each(function(i, e) {hljs.highlightBlock(e)});
+  });
+
+  $("form#book-mailing-list").submit(function(event) {
+    event.preventDefault();
+    var $form = $(this);
+    $form.find("p")
+    var $email = $form.find("input[name='email']");
+    $.post("http://46.101.77.192/book-mailing-list", {email: $email.val()});
+    $email.val("").blur()
+    $form.attr("novalidate", "novalidate");
+    $form.find("p#confirmation").html("<strong>Thanks!</strong> We'll send you the sample chapter as soon as it's ready.")
+  });
+
+</script>
+
+<iframe name="oauth2relay558138618" id="oauth2relay558138618" src="./Practical Persistence in Go_ Organising Database Access_files/postmessageRelay.html" tabindex="-1" aria-hidden="true" style="width: 1px; height: 1px; position: absolute; top: -100px;"></iframe><iframe id="rufous-sandbox" scrolling="no" frameborder="0" allowtransparency="true" allowfullscreen="true" style="position: absolute; visibility: hidden; display: none; width: 0px; height: 0px; padding: 0px; border: none;" title="Twitter analytics iframe" src="./Practical Persistence in Go_ Organising Database Access_files/saved_resource.html"></iframe></body></html>
