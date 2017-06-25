@@ -27,13 +27,15 @@
 
 Мне нравятся конкретные примеры, давайте продолжим работу с базой данных онлайн магазина и кодом из моего предыдущего [поста](http://www.alexedwards.net/blog/practical-persistence-sql) . Мы рассмотрим создание простых приложений с MVC (Model View Controller) подобной структурой - с обработчиками HTTP в основном приложении и отдельным пакетом моделей содержащей глобавльные переменные для БД, функцию InitDB(), и нашу логику по базе данных. 
 
+```
 bookstore
 ├── main.go
 └── models
 	├── books.go
 	└── db.go
+```
 
-`File: main.go
+```File: main.go
 package main
 
 import (
@@ -62,9 +64,9 @@ func booksIndex(w http.ResponseWriter, r *http.Request) {
     for _, bk := range bks {
         fmt.Fprintf(w, "%s, %s, %s, £%.2f\n", bk.Isbn, bk.Title, bk.Author, bk.Price)
     }
-}`
+}```
 
-`File: models/db.go
+```File: models/db.go
 package models
 
 import (
@@ -85,9 +87,9 @@ func InitDB(dataSourceName string) {
     if err = db.Ping(); err != nil {
         log.Panic(err)
     }
-}`
+}```
 
-`File: models/books.go
+```File: models/books.go
 package models
 
 type Book struct {
@@ -117,14 +119,14 @@ func AllBooks() ([]*Book, error) {
         return nil, err
     }
     return bks, nil
-}`
+}```
 
 Если вы запустите приложение и выполните запрос на /books вы должны получить ответ похожий на:
-`$ curl -i localhost:3000/books
+```$ curl -i localhost:3000/books
 HTTP/1.1 200 OK
 Content-Length: 205
 Content-Type: text/plain; charset=utf-8
 
 978-1503261969, Emma, Jayne Austen, £9.44
 978-1505255607, The Time Machine, H. G. Wells, £5.99
-978-1503379640, The Prince, Niccolò Machiavelli, £6.99`
+978-1503379640, The Prince, Niccolò Machiavelli, £6.99```
