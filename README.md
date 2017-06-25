@@ -264,3 +264,62 @@ func AllBooks(db *sql.DB) ([]*Book, error) {
     return bks, nil
 }
 ```
+
+# Или использовать замыкания...
+
+Если вы не хотите определять ваши обработчики и методы в Env, альтернативным подходом будет использование логики обработчиков в замыкании и закрытие переменной Env следующим образом:
+
+File: main.go
+```go
+package main
+
+import (
+    "bookstore/models"
+    "database/sql"
+    "fmt"
+    "log"
+    "net/http"
+)
+
+type Env struct {
+    db *sql.DB
+}
+
+func main() {
+    db, err := models.NewDB("postgres://user:pass@localhost/bookstore")
+    if err != nil {
+        log.Panic(err)
+    }
+    env := &Env{db: db}
+
+    http.Handle("/books", booksIndex(env))
+    http.ListenAndServe(":3000", nil)
+}
+
+func booksIndex(env *Env) http.Handler {
+    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        if r.Method != "GET" {
+            http.Error(w, http.StatusText(405), 405)
+            return
+        }
+        bks, err := models.AllBooks(env.db)
+        if err != nil {
+            http.Error(w, http.StatusText(500), 500)
+            return
+        }
+        for _, bk := range bks {
+            fmt.Fprintf(w, "%s, %s, %s, £%.2f\n", bk.Isbn, bk.Title, bk.Author, bk.Price)
+        }
+    })
+}
+```
+
+Внедрение зависимостей является хорошим подходом, когда:
+
+* Все ваши обработчики находятся в одном пакете. 
+* Все обработчики имеют один и тот же набор зависимостей.
+* Подход к тестированию означает, что вы не нуждаетесь в проверке базы данных и не запускаете параллельные тесты.
+
+Еще раз, вы можете использовать этот подход, если ваши обработчики и логика базы данных будут распределены по нескольким пакетам. Один из способов добиться этого, создать отдельный конфигурационный пакет, экспортируемый тип Env и закрытие конфигурацию. Один из способов использования Env в примере выше. А так же простой [пример](https://gist.github.com/alexedwards/5cd712192b4831058b21).
+
+# Использование интерфейсов
