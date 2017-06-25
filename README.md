@@ -30,5 +30,101 @@
 bookstore
 ├── main.go
 └── models
-    ├── books.go
-    └── db.go
+	├── books.go
+	└── db.go
+
+`File: main.go
+package main
+
+import (
+    "bookstore/models"
+    "fmt"
+    "net/http"
+)
+
+func main() {
+    models.InitDB("postgres://user:pass@localhost/bookstore")
+
+    http.HandleFunc("/books", booksIndex)
+    http.ListenAndServe(":3000", nil)
+}
+
+func booksIndex(w http.ResponseWriter, r *http.Request) {
+    if r.Method != "GET" {
+        http.Error(w, http.StatusText(405), 405)
+        return
+    }
+    bks, err := models.AllBooks()
+    if err != nil {
+        http.Error(w, http.StatusText(500), 500)
+        return
+    }
+    for _, bk := range bks {
+        fmt.Fprintf(w, "%s, %s, %s, £%.2f\n", bk.Isbn, bk.Title, bk.Author, bk.Price)
+    }
+}`
+
+`File: models/db.go
+package models
+
+import (
+    "database/sql"
+    _ "github.com/lib/pq"
+    "log"
+)
+
+var db *sql.DB
+
+func InitDB(dataSourceName string) {
+    var err error
+    db, err = sql.Open("postgres", dataSourceName)
+    if err != nil {
+        log.Panic(err)
+    }
+
+    if err = db.Ping(); err != nil {
+        log.Panic(err)
+    }
+}`
+
+`File: models/books.go
+package models
+
+type Book struct {
+    Isbn   string
+    Title  string
+    Author string
+    Price  float32
+}
+
+func AllBooks() ([]*Book, error) {
+    rows, err := db.Query("SELECT * FROM books")
+    if err != nil {
+        return nil, err
+    }
+    defer rows.Close()
+
+    bks := make([]*Book, 0)
+    for rows.Next() {
+        bk := new(Book)
+        err := rows.Scan(&bk.Isbn, &bk.Title, &bk.Author, &bk.Price)
+        if err != nil {
+            return nil, err
+        }
+        bks = append(bks, bk)
+    }
+    if err = rows.Err(); err != nil {
+        return nil, err
+    }
+    return bks, nil
+}`
+
+Если вы запустите приложение и выполните запрос на /books вы должны получить ответ похожий на:
+`$ curl -i localhost:3000/books
+HTTP/1.1 200 OK
+Content-Length: 205
+Content-Type: text/plain; charset=utf-8
+
+978-1503261969, Emma, Jayne Austen, £9.44
+978-1505255607, The Time Machine, H. G. Wells, £5.99
+978-1503379640, The Prince, Niccolò Machiavelli, £6.99`
